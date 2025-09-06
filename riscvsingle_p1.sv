@@ -5,44 +5,6 @@
 // SW
 // BEQ
 
-module testbench();
-
-  logic        clk;
-  logic        reset;
-
-  logic [31:0] WriteData, DataAdr;
-  logic        MemWrite;
-
-  // instantiate device to be tested
-  top dut(clk, reset, WriteData, DataAdr, MemWrite);
-  
-  // initialize test
-  initial
-    begin
-      reset <= 1; # 22; reset <= 0;
-    end
-
-  // generate clock to sequence tests
-  always
-    begin
-      clk <= 1; # 5; clk <= 0; # 5;
-    end
-
-  // check results
-  always @(negedge clk)
-    begin
-      if(MemWrite) begin
-        if(DataAdr === 100 & WriteData === 25) begin
-          $display("Simulation succeeded");
-          $stop;
-        end else if (DataAdr !== 96) begin
-          $display("Simulation failed");
-          $stop;
-        end
-      end
-    end
-endmodule
-
 module top(input  logic        clk, reset, 
            output logic [31:0] WriteData, DataAdr, 
            output logic        MemWrite);
@@ -55,7 +17,8 @@ module top(input  logic        clk, reset,
   imem imem(PC, Instr);
   dmem dmem(clk, MemWrite, DataAdr, WriteData, ReadData);
 endmodule
-// A gente acha q esse é o processador por inteiro
+
+// Processador monociclo
 module riscvsingle(input  logic        clk, reset,
                    output logic [31:0] PC,
                    input  logic [31:0] Instr,
@@ -66,7 +29,7 @@ module riscvsingle(input  logic        clk, reset,
   logic       ALUSrc, RegWrite, Jump, Zero;
   logic [1:0] ResultSrc, ImmSrc;
   logic [2:0] ALUControl;
-              // opcode, funct3, funct7(?)
+              // opcode, funct3, funct7(?)              
   controller c(Instr[6:0], Instr[14:12], Instr[30], Zero,
                ResultSrc, MemWrite, PCSrc,
                ALUSrc, RegWrite, Jump,
@@ -95,8 +58,9 @@ module controller(input  logic [6:0] op,
   maindec md(op, ResultSrc, MemWrite, Branch,
              ALUSrc, RegWrite, Jump, ImmSrc, ALUOp);
   aludec  ad(op[5], funct3, funct7b5, ALUOp, ALUControl);
-
-  assign PCSrc = Branch & Zero;
+  // PCSrc é o controle do mux que escolhe entre PC+4 e PCTarget
+  //MUDANÇA AQUI, faltava a verificação do jump, so fazia o da branch
+  assign PCSrc = Branch & Zero | Jump;
 endmodule
 // Control azul do desenho slide 29, problema com certeza ta aqui. addi e jal
 module maindec(input  logic [6:0] op,
@@ -108,20 +72,44 @@ module maindec(input  logic [6:0] op,
                output logic [1:0] ALUOp);
 
   logic [10:0] controls;
-
+  //MUDANÇA AQUI -> Não tinha jump
   assign {RegWrite, ImmSrc, ALUSrc, MemWrite,
-          ResultSrc, Branch, ALUOp} = controls;
+          ResultSrc, Branch, ALUOp, Jump} = controls;
 
   always_comb
     case(op)
-    // RegWrite_ImmSrc_ALUSrc_MemWrite_ResultSrc_Branch_ALUOp_Jump // me explique esse comentario 
-    // 
-      7'b0000011: controls = 11'b1_00_1_0_01_0_00_0; // lw
-      7'b0100011: controls = 11'b0_01_1_1_00_0_00_0; // sw
+    // RegWrite_ImmSrc_ALUSrc_MemWrite_ResultSrc_Branch_ALUOp_Jump 
+      7'b0000011: controls = 11'b1_00_1_0_01_0_00_0; // lw I - type
+      7'b0100011: controls = 11'b0_01_1_1_00_0_00_0; // sw S - type
       7'b0110011: controls = 11'b1_xx_0_0_00_0_10_0; // R-type 
-      7'b1100011: controls = 11'b0_10_0_0_00_1_01_0; // beq
-      //7'b1101111: controls = 11'b1_00_1_0_01_0_00_0; // jal
-      //7'b0010011: controls = 11'b1_00_1_0_01_0_00_0; // addi
+      7'b1100011: controls = 11'b0_10_0_0_00_1_01_0; // beq B - type
+    
+      //MUDANÇA AQUI
+      7'b1101111: controls = 11'b1_11_0_0_10_0_00_1; // jal  J - type
+      /*
+      regwrite -> 1, pq escreve o endereço da próxima linha no registrador
+      Immsrc -> 11, pq ta definido assim para j type no extend
+      alusrc -> 0 pq jal nao é imediato
+      MemWrite -> 0, pq so escreve no registrador, e não na memória
+      ResultSrc -> 10, pq ele tem que escolher o pcplus4 (endereço?) para escrever no registrador
+      Branch -> 0, pq a gente ta fazendo um jump, nao branch
+      AluOp -> 00, pq nao é uma operação da ula
+      Jump -> 1, pq é uma operação de jump
+      */
+
+      7'b0010011: controls = 11'b1_00_1_0_00_0_11_0; // addi I - type
+      
+      /*
+      regwrite -> 1, pq tem que escrever no registrador 
+      Immsrc -> 00, pq ta definido assim para I type no extend
+      alusrc -> 1, pq é I-Type e tem q usar imediato
+      MemWrite -> 0, pq nao escreve nada na memoria, so em registrador
+      ResultSrc -> 00, escolhe o aluresult pq usa na soma
+      Branch -> 0, pq nao é branch
+      AluOp -> 11, pq so precisa ser diferente dde 01 e 00. para entrar dentro do caso separado para o I type
+      Jump -> 0, pq nao é jump
+      */
+
       /*
         O problema é que ta faltando o jump - tipo r (ele nao consegue fazer jal)
         ta faltando o imediato - tipo i (ele nao consegue fazer addi, lw, sw )
@@ -145,6 +133,7 @@ module aludec(input  logic       opb5,
     case(ALUOp)
       2'b00:                ALUControl = 3'b000; // addition
       2'b01:                ALUControl = 3'b001; // subtraction
+      //10 11 
       default: case(funct3) // R-type or I-type ALU
                  3'b000:  if (RtypeSub) 
                             ALUControl = 3'b001; // sub
@@ -189,8 +178,12 @@ module datapath(input  logic        clk, reset,
   // ALU logic
   mux2 #(32)  srcbmux(WriteData, ImmExt, ALUSrc, SrcB);
   alu         alu(SrcA, SrcB, ALUControl, ALUResult, Zero);
-  // substituição do 32'b0 por PCPlus4 pq o resultado do jal deve ser o endereco da proxima instrução, nesse caso seria o PCPlus4 e não zero
+
+// MUDANÇA AQUI  
+// substituição do 32'b0 por PCPlus4 pq o resultado do jal deve ser o endereco da proxima instrução, nesse caso seria o PCPlus4 e não zero
   mux3 #(32)  resultmux(ALUResult, ReadData, PCPlus4, ResultSrc, Result);
+
+
 endmodule
 
 module regfile(input  logic        clk, 
@@ -218,17 +211,32 @@ module adder(input  [31:0] a, b,
 
   assign y = a + b;
 endmodule
-
+// Acho que vai ter que mudar aqui tbm
+// começa do 7 pq ignora o opcode??
 module extend(input  logic [31:7] instr,
               input  logic [1:0]  immsrc,
               output logic [31:0] immext);
  
   always_comb
-    case(immsrc) 
-      2'b01:   immext = {{20{instr[31]}}, instr[31:25], instr[11:7]}; 
-               // B-type (branches)
-      2'b11:   immext = {{12{instr[31]}}, instr[19:12], instr[20], instr[30:21], 1'b0}; 
-      default: immext = 32'bx; // undefined
+    case(immsrc)
+    //MUDANÇA AQUI
+               // I-type (immediate)
+      2'b00:   immext = {{20{instr[31]}}, instr[31:20]};    //x_12 = 32 -> x = 20         
+                          //imediato[11:0]
+
+               // S-type (store)
+      2'b01:   immext = {{20{instr[31]}}, instr[31:25], instr[11:7]}; //x_7_5 -> x = 20
+                          //imediato[11:5], imediato[4:0]
+
+               // B-TYPE (branche) - tem que ser par, por causa do pulo. entao coloca 1'b0
+      2'b10:   immext = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};  //x_1_6_4_1_1 = 32 -> x = 19
+                                    //imediato[12], imediato[11], imediato[10:5], imediato[4:1], [0]
+
+               // J- type (jal) - tem que ser par, por causa do pulo. entao coloca 1'b0
+      2'b11:   immext = {{12{instr[31]}}, instr[19:12], instr[20], instr[30:21], 1'b0}; //x_8_1_10_1 = 32 -> x = 12
+                          //imediato [19-12], imediato[11], imediato[10-1], [0]
+                          
+      default: immext = 32'bx; // undefined  
     endcase             
 endmodule
 
@@ -251,6 +259,7 @@ module mux2 #(parameter WIDTH = 8)
 endmodule
 
 module mux3 #(parameter WIDTH = 8)
+              //d0 aluresult, d1 readata, d2 pcplus4
              (input  logic [WIDTH-1:0] d0, d1, d2,
               input  logic [1:0]       s, 
               output logic [WIDTH-1:0] y);
@@ -293,7 +302,7 @@ module alu(input  logic [31:0] a, b,
   assign condinvb = alucontrol[0] ? ~b : b;
   assign sum = a + condinvb + alucontrol[0];
   assign isAddSub = ~alucontrol[2] & ~alucontrol[1] |
-                    ~alucontrol[1] & alucontrol[0]; // aq ta esquisito mas pq?
+                    ~alucontrol[1] & alucontrol[0]; 
 
   always_comb
     case (alucontrol)
